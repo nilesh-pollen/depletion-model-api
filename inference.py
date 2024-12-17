@@ -1,82 +1,212 @@
-import pandas as pd
-import numpy as np
-import warnings
+from fastapi import FastAPI, Query, HTTPException
+from enum import Enum
+from typing import List, Optional
+from pydantic import BaseModel, Field
+from contextlib import asynccontextmanager
 import joblib
-import plotly.express as px
-from datetime import date, timedelta
-import matplotlib.pyplot as plt
-from catboost import CatBoostClassifier, CatBoostRegressor
-from sklearn.model_selection import train_test_split
-
-model = joblib.load('depletion_model/model.pkl')
-train_cols = joblib.load('depletion_model/train_cols.pkl')
-X_val = joblib.load('depletion_model/X_val.pkl')
+import numpy as np
+import pandas as pd
+import uvicorn
 
 
-request = X_val.sample(1).values
-print('request',request)
+# Enums for categorical fields
+class Priority(str, Enum):
+    P1 = "p1"
+    P2 = "p2"
+    P3 = "p3"
+    EMPTY = ""
 
-predictions = model.predict(request)
-print('predictions', predictions)
+
+class PersonaSellerType(str, Enum):
+    PRINCIPAL = "principal"
+    DISTRIBUTOR = "distributor_/_wholesaler"
+    LOGISTICS = "logistics"
+    AGENT = "agent"
 
 
+class SortOrder(str, Enum):
+    ASC = "asc"
+    DESC = "desc"
+    ALPHABETICAL = "alphabetical"
+
+
+# Request Models
+class PredictionRequest(BaseModel):
+    sku_number: str
+    brand: str
+    product_category: str
+    product_subcategory: str
+    seller_name: str
+    priority: Priority
+    total_units_prev: float = Field(gt=0)
+    persona_seller_type: PersonaSellerType
+    time: int = Field(ge=-93, le=90)
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "sku_number": "XPH00359",
+                "brand": "garnier",
+                "product_category": "skin_care",
+                "product_subcategory": "masks_&_exfoliators",
+                "seller_name": "l'oreal_philippines",
+                "priority": "p1",
+                "total_units_prev": 1000.0,
+                "persona_seller_type": "principal",
+                "time": 0,
+            }
+        }
+
+
+class GlobalRankingsRequest(BaseModel):
+    data: List[PredictionRequest]
+
+
+# Response Models
+class BrandScore(BaseModel):
+    brand: str
+    scores: float
+
+
+class GlobalRankingsResponse(BaseModel):
+    data: List[BrandScore]
+    total: int
+    limit: int
+
+
+class SellerBrandScore(BaseModel):
+    brand: str
+    scores: float
+
+
+class SellerBrandsResponse(BaseModel):
+    seller: str
+    data: List[SellerBrandScore]
+    total: int
+
+
+class SellerSkuScore(BaseModel):
+    sku_number: str
+    scores: float
+
+
+class SellerSkusResponse(BaseModel):
+    seller: str
+    data: List[SellerSkuScore]
+    total: int
 
 
 def post_processing(predictions):
-  for i in range(len(predictions)):
-    if predictions[i] >= 1:
-      predictions[i] = np.random.uniform(low=90, high=100, size=(1,))
-    if predictions[i] <= 0:
-      predictions[i] = np.random.uniform(low=0, high=10, size=(1,))
-  return predictions
-
-predictions = post_processing(predictions)
+    for i in range(len(predictions)):
+        if predictions[i] >= 1:
+            predictions[i] = float(np.random.uniform(low=90, high=100))
+        if predictions[i] <= 0:
+            predictions[i] = float(np.random.uniform(low=0, high=10))
+    return predictions
 
 
-request_df = pd.DataFrame(request, columns = train_cols)
-request_df['scores'] = predictions
-print('request_df')
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load the ML model and data
+    app.state.model = joblib.load("depletion_model/model.pkl")
+    app.state.train_cols = joblib.load("depletion_model/train_cols.pkl")
+    app.state.X_val = joblib.load("depletion_model/X_val.pkl")
+
+    # Pre-compute global rankings at startup
+    df = pd.DataFrame(app.state.X_val, columns=app.state.train_cols)
+    predictions = app.state.model.predict(app.state.X_val)
+    predictions = post_processing(predictions)
+    df["scores"] = predictions
+    app.state.global_rankings_df = df  # Store for global use
+
+    yield
 
 
-global_brand_ranking = request_df.groupby('brand').scores.mean().reset_index().sort_values(by = 'scores', ascending = False).brand.reset_index(drop = True)
-
-print(global_brand_ranking)
-
-
-
-
-seller_brand_wise_depletion = request_df.groupby(['seller_name', 'brand']).scores.mean().reset_index().sort_values(by = ['seller_name', 'scores'], ascending = False).reset_index(drop = True)
-
-def get_seller_brand_rank(df):
-  global rank
-  if df['seller_name'] in seller_set:
-    rank += 1
-    return rank
-  else:
-    seller_set.add(df['seller_name'])
-    rank = 0
-    return rank
-
-rank = -1
-seller_set = set()
-seller_brand_wise_depletion['rank'] = seller_brand_wise_depletion.apply(get_seller_brand_rank, axis = 1)
-seller_brand_wise_depletion = seller_brand_wise_depletion.drop('scores', axis = 1)
+app = FastAPI(
+    title="Brand Rankings API",
+    description="API for predicting and ranking brand and SKU depletion scores",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 
+def get_seller_data(seller_name: str, df: pd.DataFrame):
+    seller_data = df[df["seller_name"] == seller_name]
+    if seller_data.empty:
+        raise HTTPException(status_code=404, detail="Seller not found")
+    return seller_data
 
-seller_sku_wise_depletion = request_df.groupby(['seller_name', 'sku_number']).scores.mean().reset_index().sort_values(by = ['seller_name', 'scores'], ascending = False).reset_index(drop = True)
 
-def get_seller_sku_rank(df):
-  global rank
-  if df['seller_name'] in seller_set:
-    rank += 1
-    return rank
-  else:
-    seller_set.add(df['seller_name'])
-    rank = 0
-    return rank
+@app.get(
+    "/pollen/depletion_model/brand_index/global",
+    response_model=GlobalRankingsResponse,
+)
+async def get_global_brand_scores(
+    limit: Optional[int] = Query(10, gt=0, le=100),
+    sort_order: SortOrder = Query(SortOrder.DESC),
+):
+    global_rankings_df = app.state.global_rankings_df
+    global_brands = (
+        global_rankings_df.groupby("brand").scores.mean().reset_index()
+    )
 
-rank = -1  # resetting rank for seller_sku
-seller_set = set()
-seller_sku_wise_depletion['rank'] = seller_sku_wise_depletion.apply(get_seller_sku_rank, axis = 1)
-seller_sku_wise_depletion = seller_sku_wise_depletion.drop('scores', axis = 1)
+    if sort_order == SortOrder.DESC:
+        global_brands = global_brands.sort_values(by="scores", ascending=False)
+    elif sort_order == SortOrder.ASC:
+        global_brands = global_brands.sort_values(by="scores", ascending=True)
+    else:
+        global_brands = global_brands.sort_values(by="brand")
+
+    return {
+        "data": global_brands.head(limit).to_dict("records"),
+        "total": len(global_brands),
+        "limit": limit,
+    }
+
+
+@app.get(
+    "/pollen/depletion_model/brand_index/by_seller/{seller_name}",
+    response_model=SellerBrandsResponse,
+)
+async def get_seller_brand_scores(seller_name: str):
+    global_rankings_df = app.state.global_rankings_df
+    seller_data = get_seller_data(seller_name, global_rankings_df)
+
+    seller_brands = (
+        seller_data.groupby("brand")
+        .scores.mean()
+        .reset_index()
+        .sort_values(by="scores", ascending=False)
+    )
+
+    return {
+        "seller": seller_name,
+        "data": seller_brands.to_dict("records"),
+        "total": len(seller_brands),
+    }
+
+
+@app.get(
+    "/pollen/depletion_model/depletion_score/by_seller/{seller_name}",
+    response_model=SellerSkusResponse,
+)
+async def get_seller_product_scores(seller_name: str):
+    global_rankings_df = app.state.global_rankings_df
+    seller_data = get_seller_data(seller_name, global_rankings_df)
+
+    seller_skus = (
+        seller_data.groupby("sku_number")
+        .scores.mean()
+        .reset_index()
+        .sort_values(by="scores", ascending=False)
+    )
+
+    return {
+        "seller": seller_name,
+        "data": seller_skus.to_dict("records"),
+        "total": len(seller_skus),
+    }
+
+
+if __name__ == "__main__":
+    uvicorn.run("inference:app", host="0.0.0.0", port=8000, reload=True)
