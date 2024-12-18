@@ -8,5 +8,6 @@ dependencies = [
     "catboost>=1.2.7",
     "fastapi>=0.115.6",
     "feature-engine>=1.8.2",
+    "magnum>=19.0.0",
     "uvicorn>=0.34.0",
 ]
