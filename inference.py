@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import uvicorn
 
+TIME = 21
 
 # Enums for categorical fields
 class Priority(str, Enum):
@@ -65,7 +66,8 @@ class GlobalRankingsRequest(BaseModel):
 # Response Models
 class BrandScore(BaseModel):
     brand: str
-    scores: float
+    priority: str
+    depletion_percent: float
 
 
 class GlobalRankingsResponse(BaseModel):
@@ -75,8 +77,9 @@ class GlobalRankingsResponse(BaseModel):
 
 
 class SellerBrandScore(BaseModel):
+    seller_name: str
     brand: str
-    scores: float
+    depletion_percent: float
 
 
 class SellerBrandsResponse(BaseModel):
@@ -86,14 +89,35 @@ class SellerBrandsResponse(BaseModel):
 
 
 class SellerSkuScore(BaseModel):
+    seller_name: str
     sku_number: str
-    scores: float
+    depletion_percent: float
 
 
 class SellerSkusResponse(BaseModel):
     seller: str
     data: List[SellerSkuScore]
     total: int
+
+class VariantData(BaseModel):
+    variant_id: str
+    variant_sku: str
+    sku: str
+    name: str
+    brand: str
+    product_category: str
+    product_sub_category: str
+    priority: str
+    total_units_prev: int
+    persona_seller_type: str
+
+class ScorePredictionRequest(BaseModel):
+    lms_company_id: str
+    lms_company_name: str
+    variants: List[VariantData]
+
+class ModelResponseData(VariantData):
+    prediction_score: float
 
 
 def post_processing(predictions):
@@ -145,17 +169,7 @@ async def get_global_brand_scores(
     limit: Optional[int] = Query(10, gt=0, le=100),
     sort_order: SortOrder = Query(SortOrder.DESC),
 ):
-    global_rankings_df = app.state.global_rankings_df
-    global_brands = (
-        global_rankings_df.groupby("brand").scores.mean().reset_index()
-    )
-
-    if sort_order == SortOrder.DESC:
-        global_brands = global_brands.sort_values(by="scores", ascending=False)
-    elif sort_order == SortOrder.ASC:
-        global_brands = global_brands.sort_values(by="scores", ascending=True)
-    else:
-        global_brands = global_brands.sort_values(by="brand")
+    global_brands = joblib.load("depletion_model/global_brand_ranking.pkl")
 
     return {
         "data": global_brands.head(limit).to_dict("records"),
@@ -169,19 +183,13 @@ async def get_global_brand_scores(
     response_model=SellerBrandsResponse,
 )
 async def get_seller_brand_scores(seller_name: str):
-    global_rankings_df = app.state.global_rankings_df
-    seller_data = get_seller_data(seller_name, global_rankings_df)
 
-    seller_brands = (
-        seller_data.groupby("brand")
-        .scores.mean()
-        .reset_index()
-        .sort_values(by="scores", ascending=False)
-    )
+    seller_brand_wise_ranking = joblib.load("depletion_model/seller_brand_wise_ranking.pkl")
+    seller_brands = seller_brand_wise_ranking[seller_brand_wise_ranking['seller_name'] == seller_name]
 
     return {
         "seller": seller_name,
-        "data": seller_brands.to_dict("records"),
+        "data": seller_brand_wise_ranking.to_dict("records"),
         "total": len(seller_brands),
     }
 
@@ -191,21 +199,45 @@ async def get_seller_brand_scores(seller_name: str):
     response_model=SellerSkusResponse,
 )
 async def get_seller_product_scores(seller_name: str):
-    global_rankings_df = app.state.global_rankings_df
-    seller_data = get_seller_data(seller_name, global_rankings_df)
-
-    seller_skus = (
-        seller_data.groupby("sku_number")
-        .scores.mean()
-        .reset_index()
-        .sort_values(by="scores", ascending=False)
-    )
+    
+    seller_sku_wise_ranking = joblib.load("depletion_model/seller_sku_wise_ranking.pkl")
+    seller_skus = seller_sku_wise_ranking[seller_sku_wise_ranking['seller_name'] == seller_name]
 
     return {
         "seller": seller_name,
         "data": seller_skus.to_dict("records"),
         "total": len(seller_skus),
     }
+
+
+@app.post(
+    "/pollen/depletion_model/depletion_score/by_seller/{seller_name}",
+    # response_model=ModelResponseData,
+)
+async def model_inference(inference_request_data: ScorePredictionRequest):
+    model = joblib.load("depletion_model/model.pkl")
+    time = TIME
+
+    for variant_data in inference_request_data.variants:
+        sku_number = variant_data.sku
+        brand = variant_data.brand
+        product_category = variant_data.product_category
+        product_sub_category = variant_data.product_sub_category
+        lms_company_name = inference_request_data.lms_company_name
+        priority = variant_data.priority
+        total_units_prev = variant_data.total_units_prev
+        persona_seller_type = variant_data.persona_seller_type
+      # global_constant. Right now 21
+
+        request = [sku_number, brand, product_category, product_sub_category, lms_company_name, priority, total_units_prev,
+                persona_seller_type, time]
+        prediction_score = model.predict(request)
+        # variant_data['score'] = prediction_score
+
+    return variant_data
+
+
+# add post processing on prediction score
 
 
 if __name__ == "__main__":
