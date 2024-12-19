@@ -11,3 +11,15 @@ wheels/
 
 # Secret keys
 .env
+
+# Elastic Beanstalk Files
+.elasticbeanstalk/*
+!.elasticbeanstalk/*.cfg.yml
+!.elasticbeanstalk/*.global.yml
+
+
+# Mac files
+.DS_Store
+
+# EBS zip files
+depletion-model-app.zip

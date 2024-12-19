@@ -18,13 +18,6 @@ class Priority(str, Enum):
     EMPTY = ""
 
 
-class PersonaSellerType(str, Enum):
-    PRINCIPAL = "principal"
-    DISTRIBUTOR = "distributor_/_wholesaler"
-    LOGISTICS = "logistics"
-    AGENT = "agent"
-
-
 class SortOrder(str, Enum):
     ASC = "asc"
     DESC = "desc"
@@ -40,7 +33,7 @@ class PredictionRequest(BaseModel):
     seller_name: str
     priority: Priority
     total_units_prev: float = Field(gt=0)
-    persona_seller_type: PersonaSellerType
+    lms_company_type: str
     time: int = Field(ge=-93, le=90)
 
     class Config:
@@ -53,7 +46,7 @@ class PredictionRequest(BaseModel):
                 "seller_name": "l'oreal_philippines",
                 "priority": "p1",
                 "total_units_prev": 1000.0,
-                "persona_seller_type": "principal",
+                "lms_company_type": "principal",
                 "time": 0,
             }
         }
@@ -120,6 +113,36 @@ class ModelResponseData(VariantData):
     prediction_score: float
 
 
+class VariantDataRequest(BaseModel):
+    variant_id: str
+    variant_sku: str
+    sku: str
+    name: str
+    brand: str
+    product_category: str
+    product_sub_category: str
+    # priority: str
+    # total_units_prev: int
+
+
+class VariantDataResponse(VariantDataRequest):
+    score: float
+
+
+class ScorePredictionRequest(BaseModel):
+    lms_company_id: str
+    lms_company_name: str
+    lms_company_type: str
+    variants: List[VariantDataRequest]
+
+
+class ScorePredictionResponse(BaseModel):
+    lms_company_id: str
+    lms_company_name: str
+    lms_company_type: str
+    variants: List[VariantDataResponse]
+
+
 def post_processing(predictions):
     for i in range(len(predictions)):
         if predictions[i] >= 1:
@@ -180,12 +203,15 @@ async def get_global_brand_scores(
 
 @app.get(
     "/pollen/depletion_model/brand_index/by_seller/{seller_name}",
-    response_model=SellerBrandsResponse,
+    # response_model=SellerBrandsResponse,
 )
 async def get_seller_brand_scores(seller_name: str):
-
-    seller_brand_wise_ranking = joblib.load("depletion_model/seller_brand_wise_ranking.pkl")
-    seller_brands = seller_brand_wise_ranking[seller_brand_wise_ranking['seller_name'] == seller_name]
+    seller_brand_wise_ranking = joblib.load(
+        "depletion_model/seller_brand_wise_ranking.pkl"
+    )
+    seller_brands = seller_brand_wise_ranking[
+        seller_brand_wise_ranking["seller_name"] == seller_name
+    ]
 
     return {
         "seller": seller_name,
@@ -196,12 +222,15 @@ async def get_seller_brand_scores(seller_name: str):
 
 @app.get(
     "/pollen/depletion_model/depletion_score/by_seller/{seller_name}",
-    response_model=SellerSkusResponse,
+    # response_model=SellerSkusResponse,
 )
 async def get_seller_product_scores(seller_name: str):
-    
-    seller_sku_wise_ranking = joblib.load("depletion_model/seller_sku_wise_ranking.pkl")
-    seller_skus = seller_sku_wise_ranking[seller_sku_wise_ranking['seller_name'] == seller_name]
+    seller_sku_wise_ranking = joblib.load(
+        "depletion_model/seller_sku_wise_ranking.pkl"
+    )
+    seller_skus = seller_sku_wise_ranking[
+        seller_sku_wise_ranking["seller_name"] == seller_name
+    ]
 
     return {
         "seller": seller_name,
@@ -212,32 +241,52 @@ async def get_seller_product_scores(seller_name: str):
 
 @app.post(
     "/pollen/depletion_model/depletion_score/by_seller/{seller_name}",
-    # response_model=ModelResponseData,
+    response_model=ScorePredictionResponse,
 )
 async def model_inference(inference_request_data: ScorePredictionRequest):
     model = joblib.load("depletion_model/model.pkl")
     time = TIME
 
+    # Create a list to store scored variants
+    scored_variants = []
+
+    # Process each variant
     for variant_data in inference_request_data.variants:
-        sku_number = variant_data.sku
-        brand = variant_data.brand
-        product_category = variant_data.product_category
-        product_sub_category = variant_data.product_sub_category
-        lms_company_name = inference_request_data.lms_company_name
-        priority = variant_data.priority
-        total_units_prev = variant_data.total_units_prev
-        persona_seller_type = variant_data.persona_seller_type
-      # global_constant. Right now 21
+        # Create prediction request data
+        request = [
+            variant_data.sku,
+            variant_data.brand,
+            variant_data.product_category,
+            variant_data.product_sub_category,
+            inference_request_data.lms_company_name,
+            "P1",
+            100,
+            inference_request_data.lms_company_type,
+            time,
+        ]
 
-        request = [sku_number, brand, product_category, product_sub_category, lms_company_name, priority, total_units_prev,
-                persona_seller_type, time]
-        prediction_score = model.predict(request)
-        # variant_data['score'] = prediction_score
+        # Make prediction
+        prediction_score = float(model.predict([request])[0])
 
-    return variant_data
+        # Post process prediction if needed
+        prediction_score = post_processing([prediction_score])[0]
 
+        # Create response variant with score
+        scored_variant = VariantDataResponse(
+            **variant_data.model_dump(), score=prediction_score
+        )
 
-# add post processing on prediction score
+        scored_variants.append(scored_variant)
+
+    # Create response
+    response = ScorePredictionResponse(
+        lms_company_id=inference_request_data.lms_company_id,
+        lms_company_name=inference_request_data.lms_company_name,
+        lms_company_type=inference_request_data.lms_company_type,
+        variants=scored_variants,
+    )
+
+    return response
 
 
 if __name__ == "__main__":
