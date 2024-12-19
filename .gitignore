@@ -11,3 +11,12 @@ wheels/
 
 # Secret keys
 .env
+
+# Elastic Beanstalk Files
+.elasticbeanstalk/*
+!.elasticbeanstalk/*.cfg.yml
+!.elasticbeanstalk/*.global.yml
+
+
+# Mac files
+.DS_Store
