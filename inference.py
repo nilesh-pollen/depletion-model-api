@@ -19,13 +19,6 @@ class Priority(str, Enum):
     EMPTY = ""
 
 
-class PersonaSellerType(str, Enum):
-    PRINCIPAL = "principal"
-    DISTRIBUTOR = "distributor_/_wholesaler"
-    LOGISTICS = "logistics"
-    AGENT = "agent"
-
-
 class SortOrder(str, Enum):
     ASC = "asc"
     DESC = "desc"
@@ -41,7 +34,7 @@ class PredictionRequest(BaseModel):
     seller_name: str
     priority: Priority
     total_units_prev: float = Field(gt=0)
-    persona_seller_type: PersonaSellerType
+    lms_company_type: str
     time: int = Field(ge=-93, le=90)
 
     class Config:
@@ -54,7 +47,7 @@ class PredictionRequest(BaseModel):
                 "seller_name": "l'oreal_philippines",
                 "priority": "p1",
                 "total_units_prev": 1000.0,
-                "persona_seller_type": "principal",
+                "lms_company_type": "principal",
                 "time": 0,
             }
         }
@@ -101,7 +94,7 @@ class SellerSkusResponse(BaseModel):
     total: int
 
 
-class VariantData(BaseModel):
+class VariantDataRequest(BaseModel):
     variant_id: str
     variant_sku: str
     sku: str
@@ -109,18 +102,26 @@ class VariantData(BaseModel):
     brand: str
     product_category: str
     product_sub_category: str
-    score: Optional[float] = None  # Removed persona_seller_type from here
+    # priority: str
+    # total_units_prev: int
+
+
+class VariantDataResponse(VariantDataRequest):
+    score: float
 
 
 class ScorePredictionRequest(BaseModel):
     lms_company_id: str
     lms_company_name: str
-    persona_seller_type: PersonaSellerType  # Added here at top level
-    variants: List[VariantData]
+    lms_company_type: str
+    variants: List[VariantDataRequest]
 
 
-class ModelResponseData(VariantData):
-    prediction_score: float
+class ScorePredictionResponse(BaseModel):
+    lms_company_id: str
+    lms_company_name: str
+    lms_company_type: str
+    variants: List[VariantDataResponse]
 
 
 def post_processing(predictions):
@@ -221,14 +222,14 @@ async def get_seller_product_scores(seller_name: str):
 
 @app.post(
     "/pollen/depletion_model/depletion_score/by_seller/{seller_name}",
-    response_model=ScorePredictionRequest,
+    response_model=ScorePredictionResponse,
 )
 async def model_inference(inference_request_data: ScorePredictionRequest):
     model = joblib.load("depletion_model/model.pkl")
     time = TIME
 
-    # Create a list to store updated variants
-    updated_variants = []
+    # Create a list to store scored variants
+    scored_variants = []
 
     # Process each variant
     for variant_data in inference_request_data.variants:
@@ -241,7 +242,7 @@ async def model_inference(inference_request_data: ScorePredictionRequest):
             inference_request_data.lms_company_name,
             "P1",
             100,
-            inference_request_data.persona_seller_type,  # Using from top-level request data
+            inference_request_data.lms_company_type,
             time,
         ]
 
@@ -251,22 +252,22 @@ async def model_inference(inference_request_data: ScorePredictionRequest):
         # Post process prediction if needed
         prediction_score = post_processing([prediction_score])[0]
 
-        # Create a dict from the variant data
-        variant_dict = variant_data.model_dump()
+        # Create response variant with score
+        scored_variant = VariantDataResponse(
+            **variant_data.model_dump(), score=prediction_score
+        )
 
-        # Add the prediction score
-        variant_dict["score"] = prediction_score
+        scored_variants.append(scored_variant)
 
-        # Create a new VariantData object with the score
-        updated_variants.append(VariantData(**variant_dict))
+    # Create response
+    response = ScorePredictionResponse(
+        lms_company_id=inference_request_data.lms_company_id,
+        lms_company_name=inference_request_data.lms_company_name,
+        lms_company_type=inference_request_data.lms_company_type,
+        variants=scored_variants,
+    )
 
-    # Update the request data with scored variants
-    inference_request_data.variants = updated_variants
-
-    return inference_request_data
-
-
-# add post processing on prediction score
+    return response
 
 
 if __name__ == "__main__":

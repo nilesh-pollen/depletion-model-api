@@ -20,3 +20,6 @@ wheels/
 
 # Mac files
 .DS_Store
+
+# EBS zip files
+depletion-model-app.zip
