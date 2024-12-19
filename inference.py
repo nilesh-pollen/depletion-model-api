@@ -1,15 +1,12 @@
 from fastapi import FastAPI, Query, HTTPException
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 import joblib
 import numpy as np
 import pandas as pd
 import uvicorn
-
-TIME = 21
-
 
 # Enums for categorical fields
 class Priority(str, Enum):
@@ -93,6 +90,26 @@ class SellerSkusResponse(BaseModel):
     data: List[SellerSkuScore]
     total: int
 
+class VariantData(BaseModel):
+    variant_id: str
+    variant_sku: str
+    sku: str
+    name: str
+    brand: str
+    product_category: str
+    product_sub_category: str
+    priority: str
+    total_units_prev: int
+    persona_seller_type: str
+
+class ScorePredictionRequest(BaseModel):
+    lms_company_id: str
+    lms_company_name: str
+    variants: List[VariantData]
+
+class ModelResponseData(VariantData):
+    prediction_score: float
+
 
 class VariantDataRequest(BaseModel):
     variant_id: str
@@ -102,12 +119,10 @@ class VariantDataRequest(BaseModel):
     brand: str
     product_category: str
     product_sub_category: str
-    # priority: str
-    # total_units_prev: int
 
 
 class VariantDataResponse(VariantDataRequest):
-    score: float
+    score: dict
 
 
 class ScorePredictionRequest(BaseModel):
@@ -123,38 +138,28 @@ class ScorePredictionResponse(BaseModel):
     lms_company_type: str
     variants: List[VariantDataResponse]
 
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     # Load the ML model and data
+#     app.state.model = joblib.load("depletion_model/model.pkl")
+#     app.state.train_cols = joblib.load("depletion_model/train_cols.pkl")
+#     app.state.X_val = joblib.load("depletion_model/X_val.pkl")
 
-def post_processing(predictions):
-    for i in range(len(predictions)):
-        if predictions[i] >= 1:
-            predictions[i] = float(np.random.uniform(low=90, high=100))
-        if predictions[i] <= 0:
-            predictions[i] = float(np.random.uniform(low=0, high=10))
-    return predictions
+#     # Pre-compute global rankings at startup
+#     df = pd.DataFrame(app.state.X_val, columns=app.state.train_cols)
+#     predictions = app.state.model.predict(app.state.X_val)
+#     predictions = post_processing(predictions)
+#     df["scores"] = predictions
+#     app.state.global_rankings_df = df  # Store for global use
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Load the ML model and data
-    app.state.model = joblib.load("depletion_model/model.pkl")
-    app.state.train_cols = joblib.load("depletion_model/train_cols.pkl")
-    app.state.X_val = joblib.load("depletion_model/X_val.pkl")
-
-    # Pre-compute global rankings at startup
-    df = pd.DataFrame(app.state.X_val, columns=app.state.train_cols)
-    predictions = app.state.model.predict(app.state.X_val)
-    predictions = post_processing(predictions)
-    df["scores"] = predictions
-    app.state.global_rankings_df = df  # Store for global use
-
-    yield
+#     yield
 
 
 app = FastAPI(
     title="Brand Rankings API",
     description="API for predicting and ranking brand and SKU depletion scores",
     version="1.0.0",
-    lifespan=lifespan,
+    # lifespan=lifespan,
 )
 
 
@@ -196,7 +201,7 @@ async def get_seller_brand_scores(seller_name: str):
 
     return {
         "seller": seller_name,
-        "data": seller_brands.to_dict("records"),
+        "data": seller_brand_wise_ranking.to_dict("records"),
         "total": len(seller_brands),
     }
 
@@ -221,40 +226,58 @@ async def get_seller_product_scores(seller_name: str):
 
 
 @app.post(
-    "/pollen/depletion_model/depletion_score/by_seller/{seller_name}",
+    "/api/v1/depletion_model/product_variant_score",
     response_model=ScorePredictionResponse,
 )
 async def model_inference(inference_request_data: ScorePredictionRequest):
     model = joblib.load("depletion_model/model.pkl")
-    time = TIME
+    low_depletion_cats = joblib.load("depletion_model/low_depletion_cats.pkl")
+    mid_depletion_cats = joblib.load("depletion_model/mid_depletion_cats.pkl")
 
     # Create a list to store scored variants
     scored_variants = []
 
     # Process each variant
     for variant_data in inference_request_data.variants:
+
+        if variant_data.product_category in low_depletion_cats:
+            time = 90
+        elif variant_data.product_category in mid_depletion_cats:
+            time = 60
+        else:
+            time = 30
+
         # Create prediction request data
-        request = [
+        request1 = [
             variant_data.sku,
-            variant_data.brand,
-            variant_data.product_category,
-            variant_data.product_sub_category,
-            inference_request_data.lms_company_name,
-            "P1",
-            100,
-            inference_request_data.lms_company_type,
-            time,
+            variant_data.brand.lower().replace(' ', '_'),
+            variant_data.product_category.lower().replace(' ', '_'),
+            variant_data.product_sub_category.lower().replace(' ', '_'),
+            inference_request_data.lms_company_name.lower().replace(' ', '_'),
+            inference_request_data.lms_company_type.lower().replace(' ', '_'),
+            "p1",
+            time
         ]
 
+        request2 = request1.copy()
+        request3 = request1.copy()
+        request2[6] = 'p2'
+        request3[6] = 'p3'
+
         # Make prediction
-        prediction_score = float(model.predict([request])[0])
+        prediction_score = {'p1' : model.predict(request1)*100, 'p2' : model.predict(request2)*100,
+                            'p3' : model.predict(request3)*100}
 
         # Post process prediction if needed
-        prediction_score = post_processing([prediction_score])[0]
+        for priority in prediction_score.keys():
+            if prediction_score[priority] >= 100:
+                prediction_score[priority] = np.random.uniform(low=90, high=100, size=(1,))
+            elif prediction_score[priority] <= 0:
+                prediction_score[priority] = np.random.uniform(low=0, high=10, size=(1,))
 
         # Create response variant with score
         scored_variant = VariantDataResponse(
-            **variant_data.model_dump(), score=prediction_score
+            **variant_data.model_dump(), score = prediction_score
         )
 
         scored_variants.append(scored_variant)
