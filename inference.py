@@ -3,10 +3,12 @@ from enum import Enum
 from typing import List, Optional, Dict
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
+from fastapi.middleware.cors import CORSMiddleware
 import joblib
 import numpy as np
 import pandas as pd
 import uvicorn
+
 
 # Enums for categorical fields
 class Priority(str, Enum):
@@ -90,6 +92,7 @@ class SellerSkusResponse(BaseModel):
     data: List[SellerSkuScore]
     total: int
 
+
 class VariantData(BaseModel):
     variant_id: str
     variant_sku: str
@@ -102,10 +105,12 @@ class VariantData(BaseModel):
     total_units_prev: int
     persona_seller_type: str
 
+
 class ScorePredictionRequest(BaseModel):
     lms_company_id: str
     lms_company_name: str
     variants: List[VariantData]
+
 
 class ModelResponseData(VariantData):
     prediction_score: float
@@ -138,6 +143,7 @@ class ScorePredictionResponse(BaseModel):
     lms_company_type: str
     variants: List[VariantDataResponse]
 
+
 # @asynccontextmanager
 # async def lifespan(app: FastAPI):
 #     # Load the ML model and data
@@ -160,6 +166,16 @@ app = FastAPI(
     description="API for predicting and ranking brand and SKU depletion scores",
     version="1.0.0",
     # lifespan=lifespan,
+)
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "*"
+    ],  # Allows all origins - you can restrict this in production
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
 
 
@@ -239,7 +255,6 @@ async def model_inference(inference_request_data: ScorePredictionRequest):
 
     # Process each variant
     for variant_data in inference_request_data.variants:
-
         if variant_data.product_category in low_depletion_cats:
             time = 90
         elif variant_data.product_category in mid_depletion_cats:
@@ -250,34 +265,41 @@ async def model_inference(inference_request_data: ScorePredictionRequest):
         # Create prediction request data
         request1 = [
             variant_data.sku,
-            variant_data.brand.lower().replace(' ', '_'),
-            variant_data.product_category.lower().replace(' ', '_'),
-            variant_data.product_sub_category.lower().replace(' ', '_'),
-            inference_request_data.lms_company_name.lower().replace(' ', '_'),
-            inference_request_data.lms_company_type.lower().replace(' ', '_'),
+            variant_data.brand.lower().replace(" ", "_"),
+            variant_data.product_category.lower().replace(" ", "_"),
+            variant_data.product_sub_category.lower().replace(" ", "_"),
+            inference_request_data.lms_company_name.lower().replace(" ", "_"),
+            inference_request_data.lms_company_type.lower().replace(" ", "_"),
             "p1",
-            time
+            time,
         ]
 
         request2 = request1.copy()
         request3 = request1.copy()
-        request2[6] = 'p2'
-        request3[6] = 'p3'
+        request2[6] = "p2"
+        request3[6] = "p3"
 
         # Make prediction
-        prediction_score = {'p1' : model.predict(request1)*100, 'p2' : model.predict(request2)*100,
-                            'p3' : model.predict(request3)*100}
+        prediction_score = {
+            "p1": model.predict(request1) * 100,
+            "p2": model.predict(request2) * 100,
+            "p3": model.predict(request3) * 100,
+        }
 
         # Post process prediction if needed
         for priority in prediction_score.keys():
             if prediction_score[priority] >= 100:
-                prediction_score[priority] = np.random.uniform(low=90, high=100, size=(1,))
+                prediction_score[priority] = np.random.uniform(
+                    low=90, high=100, size=(1,)
+                )
             elif prediction_score[priority] <= 0:
-                prediction_score[priority] = np.random.uniform(low=0, high=10, size=(1,))
+                prediction_score[priority] = np.random.uniform(
+                    low=0, high=10, size=(1,)
+                )
 
         # Create response variant with score
         scored_variant = VariantDataResponse(
-            **variant_data.model_dump(), score = prediction_score
+            **variant_data.model_dump(), score=prediction_score
         )
 
         scored_variants.append(scored_variant)
